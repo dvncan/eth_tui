@@ -1,0 +1,112 @@
+[
+  {
+    "at": 1774181858,
+    "cfg": "ETH/USD",
+    "slug": "eth-updown-5m-1774181700",
+    "end_ts": 1774182000,
+    "signal": "BUY DOWN",
+    "entry_price": 0.335,
+    "resolved": true,
+    "won": false,
+    "pnl": -5
+  },
+  {
+    "at": 1774182071,
+    "cfg": "BTC/USD",
+    "slug": "btc-updown-5m-1774182000",
+    "end_ts": 1774182300,
+    "signal": "BUY UP",
+    "entry_price": 0.485,
+    "resolved": true,
+    "won": true,
+    "pnl": 5.309278350515465
+  },
+  {
+    "at": 1774182214,
+    "cfg": "ETH/USD",
+    "slug": "eth-updown-15m-1774181700",
+    "end_ts": 1774182600,
+    "signal": "BUY DOWN",
+    "entry_price": 0.085,
+    "resolved": true,
+    "won": false,
+    "pnl": -5
+  },
+  {
+    "at": 1774182242,
+    "cfg": "ETH/USD",
+    "slug": "eth-updown-5m-1774182000",
+    "end_ts": 1774182300,
+    "signal": "BUY DOWN",
+    "entry_price": 0.305,
+    "resolved": true,
+    "won": false,
+    "pnl": -5
+  },
+  {
+    "at": 1774182614,
+    "cfg": "BTC/USD",
+    "slug": "btc-updown-5m-1774182600",
+    "end_ts": 1774182900,
+    "signal": "BUY UP",
+    "entry_price": 0.495,
+    "resolved": true,
+    "won": false,
+    "pnl": -5
+  },
+  {
+    "at": 1774183142,
+    "cfg": "ETH/USD",
+    "slug": "eth-updown-15m-1774182600",
+    "end_ts": 1774183500,
+    "signal": "BUY UP",
+    "entry_price": 0.175,
+    "resolved": true,
+    "won": false,
+    "pnl": -5
+  },
+  {
+    "at": 1774183145,
+    "cfg": "BTC/USD",
+    "slug": "btc-updown-5m-1774182900",
+    "end_ts": 1774183200,
+    "signal": "BUY UP",
+    "entry_price": 0.515,
+    "resolved": true,
+    "won": false,
+    "pnl": -5
+  },
+  {
+    "at": 1774183194,
+    "cfg": "BTC/USD",
+    "slug": "btc-updown-15m-1774182600",
+    "end_ts": 1774183500,
+    "signal": "BUY UP",
+    "entry_price": 0.455,
+    "resolved": false,
+    "won": false,
+    "pnl": 0
+  },
+  {
+    "at": 1774183723,
+    "cfg": "SOL/USD",
+    "slug": "sol-updown-5m-1774183500",
+    "end_ts": 1774183800,
+    "signal": "BUY UP",
+    "entry_price": 0.375,
+    "resolved": false,
+    "won": false,
+    "pnl": 0
+  },
+  {
+    "at": 1774183727,
+    "cfg": "ETH/USD",
+    "slug": "eth-updown-15m-1774183500",
+    "end_ts": 1774184400,
+    "signal": "BUY UP",
+    "entry_price": 0.605,
+    "resolved": false,
+    "won": false,
+    "pnl": 0
+  }
+]

@@ -391,6 +391,84 @@ func (t *PredictionTracker) Recent(n int) []*Prediction {
 	return out
 }
 
+// ── Bankroll & Bet Sizing ─────────────────────────────────────────────────────
+
+type BankrollMgr struct {
+	mu     sync.Mutex
+	Amount float64
+}
+
+func newBankrollMgr(initial float64) *BankrollMgr {
+	m := &BankrollMgr{Amount: initial}
+	data, err := os.ReadFile("bankroll.json")
+	if err == nil {
+		json.Unmarshal(data, &m.Amount)
+	}
+	return m
+}
+
+func (m *BankrollMgr) Get() float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.Amount
+}
+
+func (m *BankrollMgr) Adjust(delta float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Amount += delta
+	if m.Amount < 0 {
+		m.Amount = 0
+	}
+	data, _ := json.Marshal(m.Amount)
+	os.WriteFile("bankroll.json", data, 0644)
+}
+
+// kellyBet returns the full-Kelly and half-Kelly dollar amounts.
+// entryPrice: what you pay per share (e.g. 0.52 for UP token)
+// edge: historical win rate (e.g. 0.62)
+// bankroll: current dollars available
+func kellyBet(bankroll, entryPrice, edge float64) (kelly, halfKelly float64) {
+	if entryPrice <= 0.01 || entryPrice >= 0.99 || edge <= 0.5 || bankroll <= 0 {
+		return 0, 0
+	}
+	b := (1.0 - entryPrice) / entryPrice // net payout per $1 bet
+	p := edge
+	q := 1.0 - p
+	f := (b*p - q) / b
+	if f < 0 {
+		f = 0
+	}
+	return f * bankroll, (f / 2.0) * bankroll
+}
+
+// entryWindow returns the recommended price range to enter a trade.
+// "Good entry" = within 2% of current price, "wait" if spread is too wide.
+func entryAdvice(sig *Signals) string {
+	if sig.EntryPrice <= 0.01 {
+		return ""
+	}
+	p := sig.EntryPrice
+	// Max price you should pay: current price + 3 cents (don't chase)
+	maxPay := p + 0.03
+	if maxPay > 0.97 {
+		maxPay = 0.97
+	}
+	spread := 0.0
+	if sig.BookAskTotal > 0 && sig.BookBidTotal > 0 {
+		spread = sig.BookSkewRatio
+	}
+	quality := "ENTER NOW"
+	if p > 0.70 {
+		quality = "OVERPRICED — WAIT"
+	} else if p < 0.30 {
+		quality = "CHECK LIQUIDITY"
+	} else if spread < 0.5 {
+		quality = "THIN BOOK — WAIT"
+	}
+	return fmt.Sprintf("entry ≤ %.2f  [%s]", maxPay, quality)
+}
+
 // ── Chainlink ────────────────────────────────────────────────────────────────
 
 type rpcReq struct {
@@ -756,6 +834,10 @@ type Signals struct {
 	CompositeScore float64
 	CompositeLabel string
 	CompositeConf  string
+
+	// Bet sizing fields (populated by computeSignals)
+	EntryPrice   float64 // market price in the predicted direction
+	BacktestEdge float64 // historical win rate for this config/mode
 }
 
 func normCDF(x float64) float64 { return 0.5 * math.Erfc(-x/math.Sqrt2) }
@@ -871,6 +953,12 @@ func computeSignals(history []PricePoint, mkt *MarketInfo, bookUp *OrderBook, cf
 	case sig.CompositeScore <= -0.15: sig.CompositeLabel = "BUY DOWN"
 	default:                          sig.CompositeLabel = "NEUTRAL"
 	}
+
+	sig.BacktestEdge = cfg.BacktestEdge
+	switch sig.CompositeLabel {
+	case "BUY UP":   sig.EntryPrice = mkt.UpPrice
+	case "BUY DOWN": sig.EntryPrice = mkt.DownPrice
+	}
 	return sig
 }
 
@@ -939,7 +1027,7 @@ func labelColor(label string) string {
 	}
 }
 
-func renderSignals(sig *Signals, W int) []string {
+func renderSignals(sig *Signals, bankroll float64, W int) []string {
 	var lines []string
 	lines = append(lines, pad(color("  ◆ SIGNALS", bold+cyan), W))
 
@@ -981,6 +1069,30 @@ func renderSignals(sig *Signals, W int) []string {
 		color(solidBar(sig.CompositeScore, 30), compCol),
 		sig.CompositeScore, color(sig.CompositeLabel, compCol),
 		labelColor(sig.CompositeConf)), W))
+
+	// ── Bet sizing ────────────────────────────────────────────────────────────
+	if sig.CompositeLabel != "NEUTRAL" && sig.CompositeLabel != "INSUFFICIENT DATA" && bankroll > 0 {
+		kelly, halfKelly := kellyBet(bankroll, sig.EntryPrice, sig.BacktestEdge)
+		advice := entryAdvice(sig)
+
+		betCol := dim
+		if sig.CompositeConf == "HIGH"   { betCol = bold + green }
+		if sig.CompositeConf == "MEDIUM" { betCol = green }
+
+		betLine := fmt.Sprintf(
+			"  BET SIZE    Bankroll: $%.0f  Kelly: %s  Half-Kelly: %s  edge=%.0f%%  %s",
+			bankroll,
+			color(fmt.Sprintf("$%.2f (%.0f%%)", kelly, kelly/bankroll*100), betCol),
+			color(fmt.Sprintf("$%.2f (%.0f%%)", halfKelly, halfKelly/bankroll*100), bold+betCol),
+			sig.BacktestEdge*100,
+			color(advice, yellow),
+		)
+		lines = append(lines, pad(betLine, W))
+	} else if bankroll > 0 {
+		lines = append(lines, pad(color(fmt.Sprintf("  BET SIZE    Bankroll: $%.0f  — no trade (NEUTRAL/LOW conf)", bankroll), dim), W))
+	} else {
+		lines = append(lines, pad(color("  BET SIZE    Set bankroll with [+]/[-] keys ($10 steps)", dim), W))
+	}
 
 	return lines
 }
@@ -1094,7 +1206,7 @@ func renderTabs(activeIdx, W int) (string, string) {
 	row1 := makeRow(0, 4)
 	row2 := makeRow(4, 8)
 	// append hint to row2
-	hint := color("  tab/n=next  p=prev  q=quit", dim)
+	hint := color("  tab/n=next  p=prev  +/-=bankroll  q=quit", dim)
 	vis2 := stripANSI(row2)
 	sp := W - 2 - len([]rune(vis2)) - len([]rune(stripANSI(hint)))
 	if sp < 0 { sp = 0 }
@@ -1107,7 +1219,7 @@ func renderTabs(activeIdx, W int) (string, string) {
 	return row1, row2
 }
 
-func renderFrame(state *State, tracker *PredictionTracker) string {
+func renderFrame(state *State, tracker *PredictionTracker, bankroll float64) string {
 	idx, cache := state.active()
 	cfg := allConfigs[idx]
 
@@ -1244,7 +1356,7 @@ func renderFrame(state *State, tracker *PredictionTracker) string {
 
 	// ── Signals ──────────────────────────────────────────────────────────────
 	write("├" + box(W-2) + "┤")
-	for _, sigLine := range renderSignals(computeSignals(history, mkt, bookUp, cfg), W-2) {
+	for _, sigLine := range renderSignals(computeSignals(history, mkt, bookUp, cfg), bankroll, W-2) {
 		vis := stripANSI(sigLine)
 		sp := W - 2 - len([]rune(vis))
 		if sp < 0 { sp = 0 }
@@ -1303,9 +1415,10 @@ func renderFrame(state *State, tracker *PredictionTracker) string {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	state   := newState()
-	client  := &http.Client{Timeout: 10 * time.Second}
-	tracker := newPredictionTracker()
+	state    := newState()
+	client   := &http.Client{Timeout: 10 * time.Second}
+	tracker  := newPredictionTracker()
+	bankroll := newBankrollMgr(-150.0) // starting at -$150 loss
 	go tracker.CheckResolutionsLoop(client)
 
 	// Enter alternate screen — keeps frame fixed, no scrolling
@@ -1356,6 +1469,10 @@ func main() {
 				switchCh <- 1
 			case ch == 'p' || ch == 'P':
 				switchCh <- -1
+			case ch == '+' || ch == '=':
+				bankroll.Adjust(10)
+			case ch == '-' || ch == '_':
+				bankroll.Adjust(-10)
 			case ch >= '1' && ch <= '9':
 				if idx := int(ch - '1'); idx < len(allConfigs) {
 					switchCh <- 100 + idx
@@ -1410,7 +1527,7 @@ func main() {
 				tracker.MaybeRecord(allConfigs[activeIdx].Name, mkt, sig)
 			}
 
-			frame := renderFrame(state, tracker)
+			frame := renderFrame(state, tracker, bankroll.Get())
 			fmt.Print("\033[H\033[2J\033[H")
 			fmt.Print(frame)
 		}
