@@ -35,18 +35,26 @@ type AssetConfig struct {
 	IntervalSecs  int64
 	IntervalLabel string
 	OracleAddr    string
+	// SignalMode is derived from backtest results:
+	//   "trend"   — momentum continuation (ETH/5m, XRP/15m)
+	//   "contra"  — mean-reversion / fade the trend (ETH/15m, BTC/15m, SOL/5m, SOL/15m, BTC/5m)
+	//   "upbias"  — XRP/5m has a persistent ~57% UP win rate regardless of signal
+	SignalMode    string
+	// BacktestEdge is the backtested accuracy of the best signal (vs 50% random)
+	BacktestEdge  float64
 }
 
-// Polygon Chainlink oracle addresses (verified)
+// Polygon Chainlink oracle addresses (verified).
+// SignalMode and BacktestEdge derived from 100-market backtest (2026-03).
 var allConfigs = []AssetConfig{
-	{Name: "ETH/USD", SlugPrefix: "eth-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0xF9680D99D6C9589e2a93a78A04A279e509205945"},
-	{Name: "ETH/USD", SlugPrefix: "eth-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0xF9680D99D6C9589e2a93a78A04A279e509205945"},
-	{Name: "BTC/USD", SlugPrefix: "btc-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0xc907E116054Ad103354f2D350FD2514433D57F6F"},
-	{Name: "BTC/USD", SlugPrefix: "btc-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0xc907E116054Ad103354f2D350FD2514433D57F6F"},
-	{Name: "SOL/USD", SlugPrefix: "sol-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC"},
-	{Name: "SOL/USD", SlugPrefix: "sol-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC"},
-	{Name: "XRP/USD", SlugPrefix: "xrp-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0x785ba89291f676b5386652eB12b30cF361020694"},
-	{Name: "XRP/USD", SlugPrefix: "xrp-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0x785ba89291f676b5386652eB12b30cF361020694"},
+	{Name: "ETH/USD", SlugPrefix: "eth-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0xF9680D99D6C9589e2a93a78A04A279e509205945", SignalMode: "trend",  BacktestEdge: 0.55},
+	{Name: "ETH/USD", SlugPrefix: "eth-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0xF9680D99D6C9589e2a93a78A04A279e509205945", SignalMode: "contra", BacktestEdge: 0.57},
+	{Name: "BTC/USD", SlugPrefix: "btc-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0xc907E116054Ad103354f2D350FD2514433D57F6F", SignalMode: "contra", BacktestEdge: 0.55},
+	{Name: "BTC/USD", SlugPrefix: "btc-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0xc907E116054Ad103354f2D350FD2514433D57F6F", SignalMode: "contra", BacktestEdge: 0.54},
+	{Name: "SOL/USD", SlugPrefix: "sol-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC", SignalMode: "contra", BacktestEdge: 0.55},
+	{Name: "SOL/USD", SlugPrefix: "sol-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC", SignalMode: "contra", BacktestEdge: 0.62},
+	{Name: "XRP/USD", SlugPrefix: "xrp-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0x785ba89291f676b5386652eB12b30cF361020694", SignalMode: "upbias", BacktestEdge: 0.57},
+	{Name: "XRP/USD", SlugPrefix: "xrp-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0x785ba89291f676b5386652eB12b30cF361020694", SignalMode: "trend",  BacktestEdge: 0.54},
 }
 
 // Multiple RPC endpoints — tried in order, rotated on failure
@@ -204,6 +212,183 @@ func (s *State) switchTo(idx int) {
 	s.mu.Lock()
 	s.activeIdx = idx
 	s.mu.Unlock()
+}
+
+// ── Prediction Tracker ────────────────────────────────────────────────────────
+
+const (
+	predBet  = 5.0                  // dollars staked per prediction
+	predFile = "predictions.json"   // persisted to cwd
+)
+
+type Prediction struct {
+	At         int64   `json:"at"`
+	Config     string  `json:"cfg"`
+	Slug       string  `json:"slug"`
+	EndTs      int64   `json:"end_ts"`
+	Signal     string  `json:"signal"`      // "BUY UP" | "BUY DOWN"
+	EntryPrice float64 `json:"entry_price"` // market price at entry
+	Resolved   bool    `json:"resolved"`
+	Won        bool    `json:"won"`
+	PnL        float64 `json:"pnl"`
+}
+
+type TrackerStats struct {
+	Total, Pending, Wins, Losses int
+	PnL                          float64
+}
+
+type PredictionTracker struct {
+	mu    sync.Mutex
+	items []*Prediction
+	seen  map[string]bool
+}
+
+func newPredictionTracker() *PredictionTracker {
+	t := &PredictionTracker{seen: map[string]bool{}}
+	data, err := os.ReadFile(predFile)
+	if err == nil {
+		json.Unmarshal(data, &t.items)
+		for _, p := range t.items {
+			t.seen[p.Slug] = true
+		}
+	}
+	return t
+}
+
+func (t *PredictionTracker) save() {
+	data, _ := json.MarshalIndent(t.items, "", "  ")
+	os.WriteFile(predFile, data, 0644)
+}
+
+// MaybeRecord records a prediction when the signal is non-neutral and not already seen.
+func (t *PredictionTracker) MaybeRecord(cfgName string, mkt *MarketInfo, sig *Signals) {
+	if sig == nil || mkt == nil {
+		return
+	}
+	if sig.CompositeLabel != "BUY UP" && sig.CompositeLabel != "BUY DOWN" {
+		return
+	}
+	if sig.CompositeConf == "LOW" {
+		return
+	}
+	if time.Now().UTC().After(mkt.EndDate) {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.seen[mkt.Slug] {
+		return
+	}
+	t.seen[mkt.Slug] = true
+
+	entryPrice := mkt.UpPrice
+	if sig.CompositeLabel == "BUY DOWN" {
+		entryPrice = mkt.DownPrice
+	}
+	if entryPrice <= 0.01 {
+		return
+	}
+
+	t.items = append(t.items, &Prediction{
+		At:         time.Now().Unix(),
+		Config:     cfgName,
+		Slug:       mkt.Slug,
+		EndTs:      mkt.EndDate.Unix(),
+		Signal:     sig.CompositeLabel,
+		EntryPrice: entryPrice,
+	})
+	t.save()
+}
+
+// resolveOne checks if a pending prediction has resolved and updates it.
+func (t *PredictionTracker) resolveOne(client *http.Client, p *Prediction) {
+	if p.Resolved || time.Now().UTC().Unix() < p.EndTs {
+		return
+	}
+	resp, err := client.Get(gammaBase + "/events?slug=" + p.Slug)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+
+	var events []gammaEvent
+	if err := json.Unmarshal(sanitizeJSON(raw), &events); err != nil || len(events) == 0 {
+		return
+	}
+	if len(events[0].Markets) == 0 {
+		return
+	}
+	var prices []string
+	if err := json.Unmarshal([]byte(events[0].Markets[0].OutcomePricesRaw), &prices); err != nil || len(prices) < 2 {
+		return
+	}
+	p0, _ := strconv.ParseFloat(strings.TrimSpace(prices[0]), 64)
+	p1, _ := strconv.ParseFloat(strings.TrimSpace(prices[1]), 64)
+	if p0 < 0.95 && p1 < 0.95 {
+		return // not fully resolved yet
+	}
+	upWon := p0 > 0.95
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	p.Resolved = true
+	p.Won = (p.Signal == "BUY UP" && upWon) || (p.Signal == "BUY DOWN" && !upWon)
+	if p.Won {
+		p.PnL = predBet * (1.0/p.EntryPrice - 1.0)
+	} else {
+		p.PnL = -predBet
+	}
+	t.save()
+}
+
+func (t *PredictionTracker) CheckResolutionsLoop(client *http.Client) {
+	for {
+		time.Sleep(30 * time.Second)
+		t.mu.Lock()
+		pending := make([]*Prediction, 0, len(t.items))
+		for _, p := range t.items {
+			if !p.Resolved {
+				pending = append(pending, p)
+			}
+		}
+		t.mu.Unlock()
+		for _, p := range pending {
+			t.resolveOne(client, p)
+		}
+	}
+}
+
+func (t *PredictionTracker) Stats() TrackerStats {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s := TrackerStats{Total: len(t.items)}
+	for _, p := range t.items {
+		if !p.Resolved {
+			s.Pending++
+			continue
+		}
+		if p.Won {
+			s.Wins++
+		} else {
+			s.Losses++
+		}
+		s.PnL += p.PnL
+	}
+	return s
+}
+
+func (t *PredictionTracker) Recent(n int) []*Prediction {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]*Prediction, 0, n)
+	for i := len(t.items) - 1; i >= 0 && len(out) < n; i-- {
+		out = append(out, t.items[i])
+	}
+	return out
 }
 
 // ── Chainlink ────────────────────────────────────────────────────────────────
@@ -575,7 +760,7 @@ type Signals struct {
 
 func normCDF(x float64) float64 { return 0.5 * math.Erfc(-x/math.Sqrt2) }
 
-func computeSignals(history []PricePoint, mkt *MarketInfo, bookUp *OrderBook) *Signals {
+func computeSignals(history []PricePoint, mkt *MarketInfo, bookUp *OrderBook, cfg AssetConfig) *Signals {
 	sig := &Signals{}
 	if len(history) < 2 || mkt == nil {
 		sig.MomentumLabel = "INSUFFICIENT DATA"
@@ -649,6 +834,25 @@ func computeSignals(history []PricePoint, mkt *MarketInfo, bookUp *OrderBook) *S
 	}
 
 	momentumScore := float64(upCount)/float64(len(changes))*2 - 1
+
+	// Apply signal mode from backtest calibration
+	switch cfg.SignalMode {
+	case "contra":
+		// Mean-reversion: fade the pre-interval trend (ETH/15m, BTC/15m, SOL/5m, SOL/15m, BTC/5m)
+		momentumScore = -momentumScore
+		sig.MomentumLabel = map[string]string{
+			"BULLISH": "FADE (BEARISH)",
+			"BEARISH": "FADE (BULLISH)",
+			"NEUTRAL": "NEUTRAL",
+		}[sig.MomentumLabel]
+		if sig.MomentumLabel == "" {
+			sig.MomentumLabel = "NEUTRAL"
+		}
+	case "upbias":
+		// XRP/5m: persistent UP bias — add constant bullish boost
+		momentumScore = momentumScore*0.3 + 0.4
+	}
+
 	edgeScore := math.Max(-1, math.Min(1, sig.OracleEdge*4))
 	bookScore := 0.0
 	if sig.BookSkewRatio > 0 {
@@ -781,6 +985,52 @@ func renderSignals(sig *Signals, W int) []string {
 	return lines
 }
 
+func renderPredictions(tracker *PredictionTracker, W int) []string {
+	var lines []string
+	lines = append(lines, pad(color("  ◆ PREDICTION TRACKER", bold+cyan), W))
+
+	st := tracker.Stats()
+	resolved := st.Wins + st.Losses
+	winRate := 0.0
+	if resolved > 0 {
+		winRate = float64(st.Wins) / float64(resolved) * 100
+	}
+	pnlCol := green
+	if st.PnL < 0 {
+		pnlCol = red
+	}
+	lines = append(lines, pad(fmt.Sprintf("  Total: %d  Pending: %d  W/L: %d/%d  WinRate: %.1f%%  P&L: %s  (${%.0f}/trade)",
+		st.Total, st.Pending, st.Wins, st.Losses, winRate,
+		color(fmt.Sprintf("%+.2f", st.PnL), pnlCol), predBet), W))
+
+	recent := tracker.Recent(5)
+	if len(recent) == 0 {
+		lines = append(lines, pad(color("  No predictions yet — signals generate entries automatically", dim), W))
+	}
+	for _, p := range recent {
+		status := color("PENDING", yellow)
+		pnlStr := ""
+		if p.Resolved {
+			if p.Won {
+				status = color(" WIN  ", green)
+				pnlStr = color(fmt.Sprintf(" %+.2f", p.PnL), green)
+			} else {
+				status = color(" LOSS ", red)
+				pnlStr = color(fmt.Sprintf(" %+.2f", p.PnL), red)
+			}
+		}
+		sigCol := green
+		if p.Signal == "BUY DOWN" {
+			sigCol = red
+		}
+		ts := time.Unix(p.At, 0).UTC().Format("15:04")
+		lines = append(lines, pad(fmt.Sprintf("  %s  %-8s  %s  entry=%.3f  [%s]%s",
+			ts, p.Config, color(p.Signal, sigCol), p.EntryPrice, status, pnlStr), W))
+	}
+
+	return lines
+}
+
 func renderOrderHalf(book *OrderBook, side string, width int) []string {
 	const bw = 10
 	lw := width - 1
@@ -857,7 +1107,7 @@ func renderTabs(activeIdx, W int) (string, string) {
 	return row1, row2
 }
 
-func renderFrame(state *State) string {
+func renderFrame(state *State, tracker *PredictionTracker) string {
 	idx, cache := state.active()
 	cfg := allConfigs[idx]
 
@@ -883,7 +1133,8 @@ func renderFrame(state *State) string {
 	box := func(w int) string { return strings.Repeat("─", w) }
 
 	// ── Title + tabs ─────────────────────────────────────────────────────────
-	title := color(fmt.Sprintf("  POLYMARKET %s %s ORACLE MONITOR", cfg.Name, cfg.IntervalLabel), bold+cyan)
+	modeLabel := map[string]string{"trend": "TREND", "contra": "CONTRA", "upbias": "UPBIAS"}[cfg.SignalMode]
+	title := color(fmt.Sprintf("  POLYMARKET %s %s  [%s mode  edge=%.0f%%]", cfg.Name, cfg.IntervalLabel, modeLabel, cfg.BacktestEdge*100), bold+cyan)
 	ts := color(now.Format("15:04:05")+" UTC", dim)
 	write("┌" + box(W-2) + "┐")
 	write("│" + pad(pad(title, W-15)+ts, W-2) + "│")
@@ -993,7 +1244,7 @@ func renderFrame(state *State) string {
 
 	// ── Signals ──────────────────────────────────────────────────────────────
 	write("├" + box(W-2) + "┤")
-	for _, sigLine := range renderSignals(computeSignals(history, mkt, bookUp), W-2) {
+	for _, sigLine := range renderSignals(computeSignals(history, mkt, bookUp, cfg), W-2) {
 		vis := stripANSI(sigLine)
 		sp := W - 2 - len([]rune(vis))
 		if sp < 0 { sp = 0 }
@@ -1021,6 +1272,17 @@ func renderFrame(state *State) string {
 	if hp < 0 { hp = 0 }
 	write("│" + histLine + strings.Repeat(" ", hp) + "│")
 
+	// ── Predictions panel ────────────────────────────────────────────────────
+	write("├" + box(W-2) + "┤")
+	for _, predLine := range renderPredictions(tracker, W-2) {
+		vis := stripANSI(predLine)
+		sp := W - 2 - len([]rune(vis))
+		if sp < 0 {
+			sp = 0
+		}
+		write("│" + predLine + strings.Repeat(" ", sp) + "│")
+	}
+
 	// ── Status bar ───────────────────────────────────────────────────────────
 	write("├" + box(W-2) + "┤")
 	statusMsg := ""
@@ -1041,8 +1303,10 @@ func renderFrame(state *State) string {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	state  := newState()
-	client := &http.Client{Timeout: 10 * time.Second}
+	state   := newState()
+	client  := &http.Client{Timeout: 10 * time.Second}
+	tracker := newPredictionTracker()
+	go tracker.CheckResolutionsLoop(client)
 
 	// Enter alternate screen — keeps frame fixed, no scrolling
 	fmt.Print(hideCursor + altScreenOn)
@@ -1134,8 +1398,20 @@ func main() {
 			cleanup()
 			os.Exit(0)
 		case <-renderTick.C:
-			frame := renderFrame(state)
-			fmt.Print("\033[H\033[2J\033[H") // home + clear + home prevents scroll artifacts
+			// Record signal prediction for active market (if actionable)
+			activeIdx, activeCache := state.active()
+			activeCache.mu.RLock()
+			hist  := activeCache.priceHistory
+			mkt   := activeCache.market
+			bkUp  := activeCache.bookUp
+			activeCache.mu.RUnlock()
+			if mkt != nil {
+				sig := computeSignals(hist, mkt, bkUp, allConfigs[activeIdx])
+				tracker.MaybeRecord(allConfigs[activeIdx].Name, mkt, sig)
+			}
+
+			frame := renderFrame(state, tracker)
+			fmt.Print("\033[H\033[2J\033[H")
 			fmt.Print(frame)
 		}
 	}
