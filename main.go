@@ -1,16 +1,10 @@
 // eth-tui: Live terminal dashboard for Polymarket crypto up/down markets
 //
-// Shows:
-//   - Chainlink oracle price (on-chain, Polygon)
-//   - Active market info + countdown to resolution
-//   - CLOB order book for Up and Down tokens (side-by-side)
-//   - Price history sparkline
-//   - Trading signals
+// Assets: ETH, BTC, SOL, XRP  ×  5m and 15m windows
+// Keys: [tab]/[n] next  [p] prev  [1-8] direct select  [q] quit
 //
 // Usage:
 //   go run main.go
-//   go run main.go -slug eth-updown-15m-1774131300   # pin a specific market
-//   Keys: [tab]/[n] next market  [p] prev market  [1-8] select directly  [q] quit
 
 package main
 
@@ -18,7 +12,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"math"
@@ -44,94 +37,60 @@ type AssetConfig struct {
 	OracleAddr    string
 }
 
+// Polygon Chainlink oracle addresses (verified)
 var allConfigs = []AssetConfig{
-	{
-		Name:          "ETH/USD",
-		SlugPrefix:    "eth-updown",
-		IntervalSecs:  900,
-		IntervalLabel: "15m",
-		OracleAddr:    "0xF9680D99D6C9589e2a93a78A04A279e509205945",
-	},
-	{
-		Name:          "ETH/USD",
-		SlugPrefix:    "eth-updown",
-		IntervalSecs:  3600,
-		IntervalLabel: "1h",
-		OracleAddr:    "0xF9680D99D6C9589e2a93a78A04A279e509205945",
-	},
-	{
-		Name:          "ETH/USD",
-		SlugPrefix:    "eth-updown",
-		IntervalSecs:  14400,
-		IntervalLabel: "4h",
-		OracleAddr:    "0xF9680D99D6C9589e2a93a78A04A279e509205945",
-	},
-	{
-		Name:          "BTC/USD",
-		SlugPrefix:    "btc-updown",
-		IntervalSecs:  900,
-		IntervalLabel: "15m",
-		OracleAddr:    "0xc907E116054Ad103354f2D350FD2514433D57F6F",
-	},
-	{
-		Name:          "BTC/USD",
-		SlugPrefix:    "btc-updown",
-		IntervalSecs:  3600,
-		IntervalLabel: "1h",
-		OracleAddr:    "0xc907E116054Ad103354f2D350FD2514433D57F6F",
-	},
-	{
-		Name:          "SOL/USD",
-		SlugPrefix:    "sol-updown",
-		IntervalSecs:  900,
-		IntervalLabel: "15m",
-		OracleAddr:    "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC",
-	},
-	{
-		Name:          "MATIC/USD",
-		SlugPrefix:    "matic-updown",
-		IntervalSecs:  900,
-		IntervalLabel: "15m",
-		OracleAddr:    "0xAB594600376Ec9fD91F8e885dADF0CE036862dE0",
-	},
-	{
-		Name:          "XRP/USD",
-		SlugPrefix:    "xrp-updown",
-		IntervalSecs:  900,
-		IntervalLabel: "15m",
-		OracleAddr:    "0x785ba89291f676b5386652eB12b30cF361020694",
-	},
+	{Name: "ETH/USD", SlugPrefix: "eth-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0xF9680D99D6C9589e2a93a78A04A279e509205945"},
+	{Name: "ETH/USD", SlugPrefix: "eth-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0xF9680D99D6C9589e2a93a78A04A279e509205945"},
+	{Name: "BTC/USD", SlugPrefix: "btc-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0xc907E116054Ad103354f2D350FD2514433D57F6F"},
+	{Name: "BTC/USD", SlugPrefix: "btc-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0xc907E116054Ad103354f2D350FD2514433D57F6F"},
+	{Name: "SOL/USD", SlugPrefix: "sol-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC"},
+	{Name: "SOL/USD", SlugPrefix: "sol-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC"},
+	{Name: "XRP/USD", SlugPrefix: "xrp-updown", IntervalSecs: 300,  IntervalLabel: "5m",  OracleAddr: "0x785ba89291f676b5386652eB12b30cF361020694"},
+	{Name: "XRP/USD", SlugPrefix: "xrp-updown", IntervalSecs: 900,  IntervalLabel: "15m", OracleAddr: "0x785ba89291f676b5386652eB12b30cF361020694"},
+}
+
+// Multiple RPC endpoints — tried in order, rotated on failure
+var polygonRPCs = []string{
+	"https://polygon-mainnet.g.alchemy.com/v2/GQbpR-HuBjaHo6PmNeDX_0Q6v_JzeeL-",
+	"https://polygon-mainnet.g.alchemy.com/v2/5hhz-YQlBNS5P3a0yQP1d1NUYIH8Y60Y",
+	"https://polygon-mainnet.g.alchemy.com/v2/ekhAY1tkpnoZoXunaPchIvQLNO_VK8Ez",
+	"https://polygon-mainnet.g.alchemy.com/v2/hRaqPBE0W6yReQz2srxeEVyp4pWBZGno",
+	"https://polygon-mainnet.g.alchemy.com/v2/Ehs0Eqavi_d94auCYWrZJfgY0OoyEu2Y",
+	"https://rpc.ankr.com/polygon",
+	"https://polygon.llamarpc.com",
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const (
-	polygonRPC         = "https://1rpc.io/matic"
 	latestRoundDataSel = "0xfeaf968c"
 	gammaBase          = "https://gamma-api.polymarket.com"
 	clobBase           = "https://clob.polymarket.com"
 	termWidth          = 120
-	orderBookRows      = 7
+	orderBookRows      = 4
 	priceHistoryLen    = 18
+	// Alternate screen buffer — prevents the frame from scrolling the terminal
+	altScreenOn  = "\033[?1049h\033[H"
+	altScreenOff = "\033[?1049l"
+	hideCursor   = "\033[?25l"
+	showCursor   = "\033[?25h"
 )
 
 // ── ANSI helpers ─────────────────────────────────────────────────────────────
 
 const (
-	reset      = "\033[0m"
-	bold       = "\033[1m"
-	dim        = "\033[2m"
-	red        = "\033[31m"
-	green      = "\033[32m"
-	yellow     = "\033[33m"
-	cyan       = "\033[36m"
-	white      = "\033[37m"
-	hideCursor = "\033[?25l"
-	showCursor = "\033[?25h"
-	clearScr   = "\033[2J\033[H"
+	reset  = "\033[0m"
+	bold   = "\033[1m"
+	dim    = "\033[2m"
+	red    = "\033[31m"
+	green  = "\033[32m"
+	yellow = "\033[33m"
+	cyan   = "\033[36m"
+	white  = "\033[37m"
 )
 
 func color(s, c string) string { return c + s + reset }
+
 func pad(s string, n int) string {
 	visible := stripANSI(s)
 	diff := n - len([]rune(visible))
@@ -160,16 +119,7 @@ func stripANSI(s string) string {
 	return string(out)
 }
 
-func rpad(s string, n int) string {
-	vis := stripANSI(s)
-	diff := n - len([]rune(vis))
-	if diff <= 0 {
-		return s
-	}
-	return strings.Repeat(" ", diff) + s
-}
-
-// ── State ────────────────────────────────────────────────────────────────────
+// ── Per-config cache ─────────────────────────────────────────────────────────
 
 type PricePoint struct {
 	Price     float64
@@ -204,28 +154,47 @@ type MarketInfo struct {
 	FetchedAt    time.Time
 }
 
-type State struct {
+// ConfigCache holds live data for one (asset, interval) combination.
+type ConfigCache struct {
 	mu           sync.RWMutex
-	activeIdx    int
 	chainlink    *PricePoint
 	priceHistory []PricePoint
 	market       *MarketInfo
 	bookUp       *OrderBook
 	bookDown     *OrderBook
-	lastRender   time.Time
-	errors       []string
+	lastError    string
 }
 
-func (s *State) addError(e string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.errors = append(s.errors, e)
-	if len(s.errors) > 3 {
-		s.errors = s.errors[len(s.errors)-3:]
+func (c *ConfigCache) setError(e string) {
+	c.mu.Lock()
+	c.lastError = e
+	c.mu.Unlock()
+}
+
+// ── Top-level state ───────────────────────────────────────────────────────────
+
+type State struct {
+	mu        sync.RWMutex
+	activeIdx int
+	caches    []*ConfigCache
+}
+
+func newState() *State {
+	s := &State{caches: make([]*ConfigCache, len(allConfigs))}
+	for i := range allConfigs {
+		s.caches[i] = &ConfigCache{}
 	}
+	return s
 }
 
-func (s *State) switchMarket(idx int) {
+func (s *State) active() (int, *ConfigCache) {
+	s.mu.RLock()
+	idx := s.activeIdx
+	s.mu.RUnlock()
+	return idx, s.caches[idx]
+}
+
+func (s *State) switchTo(idx int) {
 	if idx < 0 {
 		idx = len(allConfigs) - 1
 	}
@@ -233,17 +202,8 @@ func (s *State) switchMarket(idx int) {
 		idx = 0
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if idx == s.activeIdx {
-		return
-	}
 	s.activeIdx = idx
-	s.chainlink = nil
-	s.priceHistory = nil
-	s.market = nil
-	s.bookUp = nil
-	s.bookDown = nil
-	s.errors = nil
+	s.mu.Unlock()
 }
 
 // ── Chainlink ────────────────────────────────────────────────────────────────
@@ -268,46 +228,56 @@ func fetchChainlink(client *http.Client, oracleAddr string) (*PricePoint, error)
 		},
 		ID: 1,
 	})
-	resp, err := client.Post(polygonRPC, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
 
-	var r rpcResp
-	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, err
-	}
-	if len(r.Error) > 0 && string(r.Error) != "null" {
-		return nil, fmt.Errorf("rpc: %s", r.Error)
-	}
-	data := strings.TrimPrefix(r.Result, "0x")
-	if len(data) < 5*64 {
-		return nil, fmt.Errorf("short response")
-	}
-	dec := func(s string) *big.Int {
-		b, _ := hex.DecodeString(s)
-		return new(big.Int).SetBytes(b)
-	}
-	roundID   := dec(data[0:64])
-	answer    := dec(data[64:128])
-	updatedAt := dec(data[192:256])
+	var lastErr error
+	for _, rpc := range polygonRPCs {
+		resp, err := client.Post(rpc, "application/json", bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		raw = sanitizeJSON(raw)
 
-	if answer.Cmp(new(big.Int).Lsh(big.NewInt(1), 255)) >= 0 {
-		answer.Sub(answer, new(big.Int).Lsh(big.NewInt(1), 256))
-	}
-	price, _ := new(big.Float).Quo(
-		new(big.Float).SetInt(answer),
-		new(big.Float).SetInt(big.NewInt(1e8)),
-	).Float64()
+		var r rpcResp
+		if err := json.Unmarshal(raw, &r); err != nil {
+			lastErr = fmt.Errorf("%s: %w", rpc, err)
+			continue
+		}
+		if len(r.Error) > 0 && string(r.Error) != "null" {
+			lastErr = fmt.Errorf("rpc %s: %s", rpc, r.Error)
+			continue
+		}
+		data := strings.TrimPrefix(r.Result, "0x")
+		if len(data) < 5*64 {
+			lastErr = fmt.Errorf("short response from %s", rpc)
+			continue
+		}
+		dec := func(s string) *big.Int {
+			b, _ := hex.DecodeString(s)
+			return new(big.Int).SetBytes(b)
+		}
+		roundID   := dec(data[0:64])
+		answer    := dec(data[64:128])
+		updatedAt := dec(data[192:256])
 
-	return &PricePoint{
-		Price:     price,
-		RoundID:   roundID.String(),
-		UpdatedAt: updatedAt.Int64(),
-		FetchedAt: time.Now().UTC(),
-	}, nil
+		if answer.Cmp(new(big.Int).Lsh(big.NewInt(1), 255)) >= 0 {
+			answer.Sub(answer, new(big.Int).Lsh(big.NewInt(1), 256))
+		}
+		price, _ := new(big.Float).Quo(
+			new(big.Float).SetInt(answer),
+			new(big.Float).SetInt(big.NewInt(1e8)),
+		).Float64()
+
+		return &PricePoint{
+			Price:     price,
+			RoundID:   roundID.String(),
+			UpdatedAt: updatedAt.Int64(),
+			FetchedAt: time.Now().UTC(),
+		}, nil
+	}
+	return nil, lastErr
 }
 
 // ── Gamma / Market ───────────────────────────────────────────────────────────
@@ -353,7 +323,7 @@ func sanitizeJSON(raw []byte) []byte {
 func autoDetectSlug(client *http.Client, cfg AssetConfig) (string, error) {
 	now := time.Now().UTC().Unix()
 	currentSlot := (now / cfg.IntervalSecs) * cfg.IntervalSecs
-	for i := int64(0); i < 6; i++ {
+	for i := int64(0); i < 8; i++ {
 		slot := currentSlot + i*cfg.IntervalSecs
 		slug := fmt.Sprintf("%s-%s-%d", cfg.SlugPrefix, cfg.IntervalLabel, slot)
 		resp, err := client.Get(gammaBase + "/events?slug=" + slug)
@@ -374,16 +344,13 @@ func autoDetectSlug(client *http.Client, cfg AssetConfig) (string, error) {
 			return slug, nil
 		}
 	}
-	return "", fmt.Errorf("no active %s %s market found", cfg.Name, cfg.IntervalLabel)
+	return "", fmt.Errorf("no active %s %s market", cfg.Name, cfg.IntervalLabel)
 }
 
-func fetchActiveMarket(client *http.Client, cfg AssetConfig, slug string) (*MarketInfo, error) {
-	if slug == "" {
-		var err error
-		slug, err = autoDetectSlug(client, cfg)
-		if err != nil {
-			return nil, err
-		}
+func fetchMarket(client *http.Client, cfg AssetConfig) (*MarketInfo, error) {
+	slug, err := autoDetectSlug(client, cfg)
+	if err != nil {
+		return nil, err
 	}
 	resp, err := client.Get(gammaBase + "/events?slug=" + slug)
 	if err != nil {
@@ -408,16 +375,10 @@ func fetchActiveMarket(client *http.Client, cfg AssetConfig, slug string) (*Mark
 	json.Unmarshal([]byte(m.OutcomePricesRaw), &prices)
 
 	upPrice, downPrice := 0.0, 0.0
-	if len(prices) > 0 {
-		upPrice = parseFloat(prices[0])
-	}
-	if len(prices) > 1 {
-		downPrice = parseFloat(prices[1])
-	}
+	if len(prices) > 0 { upPrice = parseFloat(prices[0]) }
+	if len(prices) > 1 { downPrice = parseFloat(prices[1]) }
 	tokenDown := ""
-	if len(tokenIDs) > 1 {
-		tokenDown = tokenIDs[1]
-	}
+	if len(tokenIDs) > 1 { tokenDown = tokenIDs[1] }
 
 	return &MarketInfo{
 		Slug:        ev.Slug,
@@ -479,8 +440,88 @@ func fetchBook(client *http.Client, tokenID string) (*OrderBook, error) {
 	asks := conv(cb.Asks)
 	sort.Slice(bids, func(i, j int) bool { return bids[i].Price > bids[j].Price })
 	sort.Slice(asks, func(i, j int) bool { return asks[i].Price < asks[j].Price })
-
 	return &OrderBook{Bids: bids, Asks: asks, FetchedAt: time.Now().UTC()}, nil
+}
+
+// ── Polling goroutines ────────────────────────────────────────────────────────
+
+// pollConfig polls oracle, market, and books for a single config index.
+// Active config is polled every tick; background configs every bgInterval ticks.
+func pollConfig(state *State, client *http.Client, cfgIdx int, activeTick, bgTick <-chan time.Time) {
+	cfg := allConfigs[cfgIdx]
+	cache := state.caches[cfgIdx]
+
+	doAll := func() {
+		// Oracle
+		p, err := fetchChainlink(client, cfg.OracleAddr)
+		if err != nil {
+			cache.setError("oracle: " + err.Error())
+		} else {
+			cache.mu.Lock()
+			cache.chainlink = p
+			cache.priceHistory = append(cache.priceHistory, *p)
+			if len(cache.priceHistory) > priceHistoryLen {
+				cache.priceHistory = cache.priceHistory[len(cache.priceHistory)-priceHistoryLen:]
+			}
+			if cache.market != nil && cache.market.OpeningPrice == 0 {
+				if time.Now().UTC().After(cache.market.StartDate) {
+					cache.market.OpeningPrice = p.Price
+				}
+			}
+			cache.lastError = ""
+			cache.mu.Unlock()
+		}
+
+		// Market
+		m, err := fetchMarket(client, cfg)
+		if err != nil {
+			cache.setError("market: " + err.Error())
+		} else {
+			cache.mu.Lock()
+			if cache.market != nil && cache.market.Slug == m.Slug {
+				m.OpeningPrice = cache.market.OpeningPrice
+			}
+			cache.market = m
+			cache.mu.Unlock()
+		}
+
+		// Books
+		cache.mu.RLock()
+		mkt := cache.market
+		cache.mu.RUnlock()
+		if mkt != nil && mkt.TokenIDUp != "" {
+			if up, err := fetchBook(client, mkt.TokenIDUp); err == nil {
+				cache.mu.Lock()
+				cache.bookUp = up
+				cache.mu.Unlock()
+			}
+			if mkt.TokenIDDown != "" {
+				if down, err := fetchBook(client, mkt.TokenIDDown); err == nil {
+					cache.mu.Lock()
+					cache.bookDown = down
+					cache.mu.Unlock()
+				}
+			}
+		}
+	}
+
+	// initial fetch
+	go doAll()
+
+	for {
+		select {
+		case <-activeTick:
+			_, activeIdx := state.active()
+			if activeIdx == cache {
+				doAll()
+			}
+		case <-bgTick:
+			_, activeIdx := state.active()
+			if activeIdx != cache {
+				doAll()
+			}
+		}
+	}
 }
 
 // ── Signals ──────────────────────────────────────────────────────────────────
@@ -510,9 +551,7 @@ type Signals struct {
 	CompositeConf  string
 }
 
-func normCDF(x float64) float64 {
-	return 0.5 * math.Erfc(-x/math.Sqrt2)
-}
+func normCDF(x float64) float64 { return 0.5 * math.Erfc(-x/math.Sqrt2) }
 
 func computeSignals(history []PricePoint, mkt *MarketInfo, bookUp *OrderBook) *Signals {
 	sig := &Signals{}
@@ -528,12 +567,9 @@ func computeSignals(history []PricePoint, mkt *MarketInfo, bookUp *OrderBook) *S
 	for i := 1; i < len(history); i++ {
 		changes = append(changes, history[i].Price-history[i-1].Price)
 	}
-	upCount := 0
-	sumChange := 0.0
+	upCount, sumChange := 0, 0.0
 	for _, c := range changes {
-		if c > 0.005 {
-			upCount++
-		}
+		if c > 0.005 { upCount++ }
 		sumChange += c
 	}
 	sig.MomentumUpCount = upCount
@@ -541,12 +577,9 @@ func computeSignals(history []PricePoint, mkt *MarketInfo, bookUp *OrderBook) *S
 	sig.MomentumAvgDelta = sumChange / float64(len(changes))
 	upRatio := float64(upCount) / float64(len(changes))
 	switch {
-	case upRatio >= 0.65:
-		sig.MomentumLabel = "BULLISH"
-	case upRatio <= 0.35:
-		sig.MomentumLabel = "BEARISH"
-	default:
-		sig.MomentumLabel = "NEUTRAL"
+	case upRatio >= 0.65: sig.MomentumLabel = "BULLISH"
+	case upRatio <= 0.35: sig.MomentumLabel = "BEARISH"
+	default:              sig.MomentumLabel = "NEUTRAL"
 	}
 
 	currentPrice := history[len(history)-1].Price
@@ -554,7 +587,6 @@ func computeSignals(history []PricePoint, mkt *MarketInfo, bookUp *OrderBook) *S
 	if mkt.OpeningPrice > 0 {
 		sig.DeltaPct = sig.DeltaFromOpen / mkt.OpeningPrice * 100
 	}
-
 	if len(changes) >= 3 {
 		meanC := sumChange / float64(len(changes))
 		variance := 0.0
@@ -564,52 +596,31 @@ func computeSignals(history []PricePoint, mkt *MarketInfo, bookUp *OrderBook) *S
 		}
 		sig.VolPerInterval = math.Sqrt(variance / float64(len(changes)))
 	}
-
 	remaining := mkt.EndDate.Sub(time.Now().UTC())
-	if remaining < 0 {
-		remaining = 0
-	}
+	if remaining < 0 { remaining = 0 }
 	sig.IntervalsLeft = remaining.Seconds() / 5.0
-
 	if sig.VolPerInterval > 0 && sig.IntervalsLeft > 0 {
 		sig.ZScore = sig.DeltaFromOpen / (sig.VolPerInterval * math.Sqrt(sig.IntervalsLeft))
 	} else if sig.DeltaFromOpen != 0 {
-		if sig.DeltaFromOpen > 0 {
-			sig.ZScore = 10
-		} else {
-			sig.ZScore = -10
-		}
+		if sig.DeltaFromOpen > 0 { sig.ZScore = 10 } else { sig.ZScore = -10 }
 	}
-
 	sig.FairValueUp = normCDF(sig.ZScore)
 	sig.OracleEdge = sig.FairValueUp - mkt.UpPrice
 	switch {
-	case sig.OracleEdge > 0.05:
-		sig.OracleEdgeLabel = "BUY UP"
-	case sig.OracleEdge < -0.05:
-		sig.OracleEdgeLabel = "BUY DOWN"
-	default:
-		sig.OracleEdgeLabel = "FAIRLY PRICED"
+	case sig.OracleEdge > 0.05:  sig.OracleEdgeLabel = "BUY UP"
+	case sig.OracleEdge < -0.05: sig.OracleEdgeLabel = "BUY DOWN"
+	default:                     sig.OracleEdgeLabel = "FAIRLY PRICED"
 	}
 
 	if bookUp != nil {
 		depth := 10
-		for _, l := range bookUp.Bids[:min(depth, len(bookUp.Bids))] {
-			sig.BookBidTotal += l.Size
-		}
-		for _, l := range bookUp.Asks[:min(depth, len(bookUp.Asks))] {
-			sig.BookAskTotal += l.Size
-		}
-		if sig.BookAskTotal > 0 {
-			sig.BookSkewRatio = sig.BookBidTotal / sig.BookAskTotal
-		}
+		for _, l := range bookUp.Bids[:min(depth, len(bookUp.Bids))] { sig.BookBidTotal += l.Size }
+		for _, l := range bookUp.Asks[:min(depth, len(bookUp.Asks))] { sig.BookAskTotal += l.Size }
+		if sig.BookAskTotal > 0 { sig.BookSkewRatio = sig.BookBidTotal / sig.BookAskTotal }
 		switch {
-		case sig.BookSkewRatio >= 1.5:
-			sig.BookSkewLabel = "BUY PRESSURE"
-		case sig.BookSkewRatio <= 0.67:
-			sig.BookSkewLabel = "SELL PRESSURE"
-		default:
-			sig.BookSkewLabel = "BALANCED"
+		case sig.BookSkewRatio >= 1.5:  sig.BookSkewLabel = "BUY PRESSURE"
+		case sig.BookSkewRatio <= 0.67: sig.BookSkewLabel = "SELL PRESSURE"
+		default:                        sig.BookSkewLabel = "BALANCED"
 		}
 	} else {
 		sig.BookSkewLabel = "NO DATA"
@@ -625,156 +636,27 @@ func computeSignals(history []PricePoint, mkt *MarketInfo, bookUp *OrderBook) *S
 
 	absScore := math.Abs(sig.CompositeScore)
 	switch {
-	case absScore >= 0.5:
-		sig.CompositeConf = "HIGH"
-	case absScore >= 0.25:
-		sig.CompositeConf = "MEDIUM"
-	default:
-		sig.CompositeConf = "LOW"
+	case absScore >= 0.5:  sig.CompositeConf = "HIGH"
+	case absScore >= 0.25: sig.CompositeConf = "MEDIUM"
+	default:               sig.CompositeConf = "LOW"
 	}
 	switch {
-	case sig.CompositeScore >= 0.15:
-		sig.CompositeLabel = "BUY UP"
-	case sig.CompositeScore <= -0.15:
-		sig.CompositeLabel = "BUY DOWN"
-	default:
-		sig.CompositeLabel = "NEUTRAL"
+	case sig.CompositeScore >= 0.15:  sig.CompositeLabel = "BUY UP"
+	case sig.CompositeScore <= -0.15: sig.CompositeLabel = "BUY DOWN"
+	default:                          sig.CompositeLabel = "NEUTRAL"
 	}
-
 	return sig
 }
 
-func renderSignals(sig *Signals, W int) []string {
-	var lines []string
+// ── Render helpers ───────────────────────────────────────────────────────────
 
-	solidBar := func(score float64, width int) string {
-		mid := width / 2
-		filled := int(math.Round(math.Abs(score) * float64(mid)))
-		if filled > mid {
-			filled = mid
-		}
-		buf := []rune(strings.Repeat("░", width))
-		if score >= 0 {
-			for i := mid; i < mid+filled && i < width; i++ {
-				buf[i] = '█'
-			}
-		} else {
-			for i := mid - filled; i < mid && i >= 0; i++ {
-				buf[i] = '█'
-			}
-		}
-		buf[mid] = '┼'
-		return string(buf)
-	}
-
-	labelColor := func(label string) string {
-		switch label {
-		case "BULLISH", "BUY UP", "BUY PRESSURE":
-			return color(label, bold+green)
-		case "BEARISH", "BUY DOWN", "SELL PRESSURE":
-			return color(label, bold+red)
-		case "HIGH":
-			return color(label, bold+green)
-		case "MEDIUM":
-			return color(label, yellow)
-		case "LOW":
-			return color(label, dim)
-		default:
-			return color(label, dim)
-		}
-	}
-
-	lines = append(lines, pad(color("  ◆ SIGNALS", bold+cyan), W))
-
-	momArrows := ""
-	for i := 0; i < sig.MomentumTotal && i < 10; i++ {
-		if i < sig.MomentumUpCount {
-			momArrows += color("▲", green)
-		} else {
-			momArrows += color("▼", red)
-		}
-	}
-	lines = append(lines, pad(fmt.Sprintf("  MOMENTUM   %s  %d/%d up  avg %+.3f$/5s  [%s]  %s",
-		momArrows,
-		sig.MomentumUpCount, sig.MomentumTotal,
-		sig.MomentumAvgDelta,
-		solidBar(float64(sig.MomentumUpCount)/float64(max(sig.MomentumTotal, 1))*2-1, 20),
-		labelColor(sig.MomentumLabel),
-	), W))
-
-	deltaCol := green
-	if sig.DeltaFromOpen < 0 {
-		deltaCol = red
-	}
-	fvCol := green
-	if sig.FairValueUp < 0.5 {
-		fvCol = red
-	}
-	edgeCol := green
-	if sig.OracleEdge < 0 {
-		edgeCol = red
-	}
-	lines = append(lines, pad(fmt.Sprintf("  EDGE        Δ open %s  vol ±%.3f$/5s  Z=%+.2f  FV=%s  edge=%s  → %s",
-		color(fmt.Sprintf("%+.2f (%+.2f%%)", sig.DeltaFromOpen, sig.DeltaPct), deltaCol),
-		sig.VolPerInterval, sig.ZScore,
-		color(fmt.Sprintf("%.3f", sig.FairValueUp), fvCol),
-		color(fmt.Sprintf("%+.3f", sig.OracleEdge), edgeCol),
-		labelColor(sig.OracleEdgeLabel),
-	), W))
-
-	skewCol := dim
-	if sig.BookSkewLabel == "BUY PRESSURE" {
-		skewCol = green
-	} else if sig.BookSkewLabel == "SELL PRESSURE" {
-		skewCol = red
-	}
-	lines = append(lines, pad(fmt.Sprintf("  BOOK SKEW   bid $%.0f / ask $%.0f = %.2fx  [%s]  %s",
-		sig.BookBidTotal, sig.BookAskTotal, sig.BookSkewRatio,
-		color(solidBar(math.Log(math.Max(sig.BookSkewRatio, 0.01)), 20), skewCol),
-		labelColor(sig.BookSkewLabel),
-	), W))
-
-	compCol := dim
-	switch sig.CompositeLabel {
-	case "BUY UP":
-		compCol = bold + green
-	case "BUY DOWN":
-		compCol = bold + red
-	}
-	lines = append(lines, pad(fmt.Sprintf("  COMPOSITE   [%s]  score %+.3f  → %s  confidence: %s",
-		color(solidBar(sig.CompositeScore, 30), compCol),
-		sig.CompositeScore,
-		color(sig.CompositeLabel, compCol),
-		labelColor(sig.CompositeConf),
-	), W))
-
-	return lines
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// ── Render ───────────────────────────────────────────────────────────────────
+func max(a, b int) int { if a > b { return a }; return b }
+func min(a, b int) int { if a < b { return a }; return b }
 
 func bar(size, maxSize float64, width int) string {
-	if maxSize <= 0 {
-		return strings.Repeat("░", width)
-	}
+	if maxSize <= 0 { return strings.Repeat("░", width) }
 	filled := int(math.Round(float64(width) * size / maxSize))
-	if filled > width {
-		filled = width
-	}
+	if filled > width { filled = width }
 	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 }
 
@@ -783,175 +665,223 @@ func fmtPrice(p float64) string {
 	parts := strings.SplitN(s, ".", 2)
 	intPart := parts[0]
 	neg := strings.HasPrefix(intPart, "-")
-	if neg {
-		intPart = intPart[1:]
-	}
+	if neg { intPart = intPart[1:] }
 	var out []byte
 	for i, c := range []byte(intPart) {
-		if i > 0 && (len(intPart)-i)%3 == 0 {
-			out = append(out, ',')
-		}
+		if i > 0 && (len(intPart)-i)%3 == 0 { out = append(out, ',') }
 		out = append(out, c)
 	}
 	result := "$" + string(out)
-	if len(parts) > 1 {
-		result += "." + parts[1]
-	}
-	if neg {
-		result = "-" + result
-	}
+	if len(parts) > 1 { result += "." + parts[1] }
+	if neg { result = "-" + result }
 	return result
 }
+
 func fmtSize(s float64) string {
-	if s >= 1000 {
-		return fmt.Sprintf("%8.0f", s)
-	}
+	if s >= 1000 { return fmt.Sprintf("%8.0f", s) }
 	return fmt.Sprintf("%8.2f", s)
 }
+
 func fmtDuration(d time.Duration) string {
 	d = d.Round(time.Second)
-	if d < 0 {
-		return "EXPIRED"
+	if d < 0 { return "EXPIRED" }
+	return fmt.Sprintf("%dm %02ds", int(d.Minutes()), int(d.Seconds())%60)
+}
+
+func solidBar(score float64, width int) string {
+	mid := width / 2
+	filled := int(math.Round(math.Abs(score) * float64(mid)))
+	if filled > mid { filled = mid }
+	buf := []rune(strings.Repeat("░", width))
+	if score >= 0 {
+		for i := mid; i < mid+filled && i < width; i++ { buf[i] = '█' }
+	} else {
+		for i := mid - filled; i < mid && i >= 0; i++ { buf[i] = '█' }
 	}
-	m := int(d.Minutes())
-	s := int(d.Seconds()) % 60
-	return fmt.Sprintf("%dm %02ds", m, s)
+	buf[mid] = '┼'
+	return string(buf)
+}
+
+func labelColor(label string) string {
+	switch label {
+	case "BULLISH", "BUY UP", "BUY PRESSURE": return color(label, bold+green)
+	case "BEARISH", "BUY DOWN", "SELL PRESSURE": return color(label, bold+red)
+	case "HIGH":   return color(label, bold+green)
+	case "MEDIUM": return color(label, yellow)
+	case "LOW":    return color(label, dim)
+	default:       return color(label, dim)
+	}
+}
+
+func renderSignals(sig *Signals, W int) []string {
+	var lines []string
+	lines = append(lines, pad(color("  ◆ SIGNALS", bold+cyan), W))
+
+	momArrows := ""
+	for i := 0; i < sig.MomentumTotal && i < 10; i++ {
+		if i < sig.MomentumUpCount { momArrows += color("▲", green) } else { momArrows += color("▼", red) }
+	}
+	lines = append(lines, pad(fmt.Sprintf("  MOMENTUM   %s  %d/%d up  avg %+.3f$/5s  [%s]  %s",
+		momArrows, sig.MomentumUpCount, sig.MomentumTotal, sig.MomentumAvgDelta,
+		solidBar(float64(sig.MomentumUpCount)/float64(max(sig.MomentumTotal, 1))*2-1, 20),
+		labelColor(sig.MomentumLabel)), W))
+
+	deltaCol := green
+	if sig.DeltaFromOpen < 0 { deltaCol = red }
+	fvCol := green
+	if sig.FairValueUp < 0.5 { fvCol = red }
+	edgeCol := green
+	if sig.OracleEdge < 0 { edgeCol = red }
+	lines = append(lines, pad(fmt.Sprintf("  EDGE        Δ open %s  vol ±%.3f$/5s  Z=%+.2f  FV=%s  edge=%s  → %s",
+		color(fmt.Sprintf("%+.2f (%+.2f%%)", sig.DeltaFromOpen, sig.DeltaPct), deltaCol),
+		sig.VolPerInterval, sig.ZScore,
+		color(fmt.Sprintf("%.3f", sig.FairValueUp), fvCol),
+		color(fmt.Sprintf("%+.3f", sig.OracleEdge), edgeCol),
+		labelColor(sig.OracleEdgeLabel)), W))
+
+	skewCol := dim
+	if sig.BookSkewLabel == "BUY PRESSURE" { skewCol = green } else if sig.BookSkewLabel == "SELL PRESSURE" { skewCol = red }
+	lines = append(lines, pad(fmt.Sprintf("  BOOK SKEW   bid $%.0f / ask $%.0f = %.2fx  [%s]  %s",
+		sig.BookBidTotal, sig.BookAskTotal, sig.BookSkewRatio,
+		color(solidBar(math.Log(math.Max(sig.BookSkewRatio, 0.01)), 20), skewCol),
+		labelColor(sig.BookSkewLabel)), W))
+
+	compCol := dim
+	switch sig.CompositeLabel {
+	case "BUY UP":   compCol = bold + green
+	case "BUY DOWN": compCol = bold + red
+	}
+	lines = append(lines, pad(fmt.Sprintf("  COMPOSITE   [%s]  score %+.3f  → %s  confidence: %s",
+		color(solidBar(sig.CompositeScore, 30), compCol),
+		sig.CompositeScore, color(sig.CompositeLabel, compCol),
+		labelColor(sig.CompositeConf)), W))
+
+	return lines
 }
 
 func renderOrderHalf(book *OrderBook, side string, width int) []string {
-	const barWidth = 10
-	labelW := width - 1
-	lines := []string{}
-
-	lines = append(lines, pad(color(fmt.Sprintf("  ORDER BOOK (%s)", side), bold+cyan), labelW))
-
+	const bw = 10
+	lw := width - 1
+	var lines []string
+	lines = append(lines, pad(color(fmt.Sprintf("  ORDER BOOK (%s)", side), bold+cyan), lw))
 	if book == nil {
-		for i := 0; i < orderBookRows*2+3; i++ {
-			lines = append(lines, strings.Repeat(" ", labelW))
-		}
+		for i := 0; i < orderBookRows*2+3; i++ { lines = append(lines, strings.Repeat(" ", lw)) }
 		return lines
 	}
-
-	displayed := append(book.Asks[:min(len(book.Asks), orderBookRows)],
-		book.Bids[:min(len(book.Bids), orderBookRows)]...)
+	displayed := append(book.Asks[:min(len(book.Asks), orderBookRows)], book.Bids[:min(len(book.Bids), orderBookRows)]...)
 	maxSize := 0.0
-	for _, l := range displayed {
-		if l.Size > maxSize {
-			maxSize = l.Size
-		}
-	}
+	for _, l := range displayed { if l.Size > maxSize { maxSize = l.Size } }
 
 	asks := book.Asks
-	if len(asks) > orderBookRows {
-		asks = asks[:orderBookRows]
-	}
+	if len(asks) > orderBookRows { asks = asks[:orderBookRows] }
 	for i := len(asks) - 1; i >= 0; i-- {
 		l := asks[i]
-		b := bar(l.Size, maxSize, barWidth)
 		lines = append(lines, pad(fmt.Sprintf("  %s %s  %s %s",
-			color(fmt.Sprintf("%.2f", l.Price), red), fmtSize(l.Size), color(b, red), "ASK",
-		), labelW))
+			color(fmt.Sprintf("%.2f", l.Price), red), fmtSize(l.Size), color(bar(l.Size, maxSize, bw), red), "ASK"), lw))
 	}
-
-	spread := ""
+	spread := "  ─────────────────────────────────────"
 	if len(book.Asks) > 0 && len(book.Bids) > 0 {
 		sp := book.Asks[0].Price - book.Bids[0].Price
 		mid := (book.Asks[0].Price + book.Bids[0].Price) / 2
 		spread = fmt.Sprintf("  ─────── mid: %.3f  spread: %.3f ───────", mid, sp)
-	} else {
-		spread = "  ─────────────────────────────────────"
 	}
-	lines = append(lines, pad(color(spread, dim), labelW))
-
+	lines = append(lines, pad(color(spread, dim), lw))
 	bids := book.Bids
-	if len(bids) > orderBookRows {
-		bids = bids[:orderBookRows]
-	}
+	if len(bids) > orderBookRows { bids = bids[:orderBookRows] }
 	for _, l := range bids {
-		b := bar(l.Size, maxSize, barWidth)
 		lines = append(lines, pad(fmt.Sprintf("  %s %s  %s %s",
-			color(fmt.Sprintf("%.2f", l.Price), green), fmtSize(l.Size), color(b, green), "BID",
-		), labelW))
+			color(fmt.Sprintf("%.2f", l.Price), green), fmtSize(l.Size), color(bar(l.Size, maxSize, bw), green), "BID"), lw))
 	}
-
-	total := orderBookRows*2 + 3
-	for len(lines) < total {
-		lines = append(lines, strings.Repeat(" ", labelW))
-	}
+	for len(lines) < orderBookRows*2+3 { lines = append(lines, strings.Repeat(" ", lw)) }
 	return lines
 }
 
-func renderTabs(activeIdx int, W int) string {
-	var sb strings.Builder
-	sb.WriteString("  ")
-	for i, cfg := range allConfigs {
-		label := fmt.Sprintf("[%d] %s %s", i+1, cfg.Name, cfg.IntervalLabel)
-		if i == activeIdx {
-			sb.WriteString(color(" "+label+" ", bold+cyan))
-		} else {
-			sb.WriteString(color(" "+label+" ", dim))
+// renderTabs returns two tab rows (4 tabs each) as separate strings.
+func renderTabs(activeIdx, W int) (string, string) {
+	makeRow := func(start, end int) string {
+		var sb strings.Builder
+		sb.WriteString(" ")
+		for i := start; i < end && i < len(allConfigs); i++ {
+			cfg := allConfigs[i]
+			// Short label: "ETH/5m" style
+			label := fmt.Sprintf("[%d] %s/%s", i+1, strings.Split(cfg.Name, "/")[0], cfg.IntervalLabel)
+			if i == activeIdx {
+				sb.WriteString(color(" "+label+" ", bold+cyan))
+			} else {
+				sb.WriteString(color(" "+label+" ", dim))
+			}
+			if i < end-1 && i < len(allConfigs)-1 {
+				sb.WriteString(color("│", dim))
+			}
 		}
-		if i < len(allConfigs)-1 {
-			sb.WriteString(color("│", dim))
-		}
+		vis := stripANSI(sb.String())
+		sp := W - 2 - len([]rune(vis))
+		if sp < 0 { sp = 0 }
+		return sb.String() + strings.Repeat(" ", sp)
 	}
-	sb.WriteString(color("  tab/n=next  p=prev  q=quit", dim))
-	vis := stripANSI(sb.String())
-	sp := W - 2 - len([]rune(vis))
-	if sp < 0 {
-		sp = 0
+	row1 := makeRow(0, 4)
+	row2 := makeRow(4, 8)
+	// append hint to row2
+	hint := color("  tab/n=next  p=prev  q=quit", dim)
+	vis2 := stripANSI(row2)
+	sp := W - 2 - len([]rune(vis2)) - len([]rune(stripANSI(hint)))
+	if sp < 0 { sp = 0 }
+	row2 = strings.TrimRight(row2, " ") + strings.Repeat(" ", sp) + hint + strings.Repeat(" ", 0)
+	// re-pad to W-2
+	vis2 = stripANSI(row2)
+	if extra := W - 2 - len([]rune(vis2)); extra > 0 {
+		row2 += strings.Repeat(" ", extra)
 	}
-	return sb.String() + strings.Repeat(" ", sp)
+	return row1, row2
 }
 
-func renderFrame(s *State) string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func renderFrame(state *State) string {
+	idx, cache := state.active()
+	cfg := allConfigs[idx]
+
+	cache.mu.RLock()
+	cl        := cache.chainlink
+	history   := cache.priceHistory
+	mkt       := cache.market
+	bookUp    := cache.bookUp
+	bookDown  := cache.bookDown
+	lastErr   := cache.lastError
+	cache.mu.RUnlock()
 
 	W := termWidth
 	half := (W - 1) / 2
 	var b strings.Builder
+	now := time.Now().UTC()
 
 	write := func(line string) {
 		vis := stripANSI(line)
-		if len([]rune(vis)) > W {
-			line = line[:W]
-		}
+		if len([]rune(vis)) > W { line = line[:W] }
 		b.WriteString(line + "\n")
 	}
 	box := func(w int) string { return strings.Repeat("─", w) }
 
-	now := time.Now().UTC()
-	cfg := allConfigs[s.activeIdx]
-
 	// ── Title + tabs ─────────────────────────────────────────────────────────
 	title := color(fmt.Sprintf("  POLYMARKET %s %s ORACLE MONITOR", cfg.Name, cfg.IntervalLabel), bold+cyan)
 	ts := color(now.Format("15:04:05")+" UTC", dim)
-	titleLine := pad(title, W-15) + ts
 	write("┌" + box(W-2) + "┐")
-	write("│" + pad(titleLine, W-2) + "│")
+	write("│" + pad(pad(title, W-15)+ts, W-2) + "│")
+	tab1, tab2 := renderTabs(idx, W)
 	write("├" + box(W-2) + "┤")
-	write("│" + renderTabs(s.activeIdx, W) + "│")
+	write("│" + tab1 + "│")
+	write("│" + tab2 + "│")
 	write("├" + box(half-1) + "┬" + box(W-half-2) + "┤")
 
-	// ── Left: Oracle  │  Right: Market ──────────────────────────────────────
-	cl := s.chainlink
-	mkt := s.market
+	// ── Left: oracle  │  Right: market info ─────────────────────────────────
+	var leftLines, rightLines []string
 
-	leftLines := make([]string, 0, 8)
 	if cl != nil {
 		leftLines = append(leftLines, color(fmt.Sprintf("  %s", fmtPrice(cl.Price)), bold+yellow))
-
-		if len(s.priceHistory) >= 2 {
-			prev := s.priceHistory[len(s.priceHistory)-2].Price
+		if len(history) >= 2 {
+			prev := history[len(history)-2].Price
 			diff := cl.Price - prev
 			pct := diff / prev * 100
 			arrow, col := "▲", green
-			if diff < 0 {
-				arrow, col = "▼", red
-			} else if diff == 0 {
-				arrow, col = "━", dim
-			}
+			if diff < 0 { arrow, col = "▼", red } else if diff == 0 { arrow, col = "━", dim }
 			leftLines = append(leftLines, color(fmt.Sprintf("  %s %+.4f (%+.2f%%)", arrow, diff, pct), col))
 		} else {
 			leftLines = append(leftLines, "")
@@ -961,26 +891,19 @@ func renderFrame(s *State) string {
 		leftLines = append(leftLines, color(fmt.Sprintf("  Updated %ds ago", age), dim))
 		leftLines = append(leftLines, color(fmt.Sprintf("  Oracle  %s...%s", cfg.OracleAddr[:6], cfg.OracleAddr[len(cfg.OracleAddr)-4:]), dim))
 		leftLines = append(leftLines, "")
-
-		if len(s.priceHistory) > 0 {
+		if len(history) > 0 {
 			sparks := "  "
-			pmin, pmax := s.priceHistory[0].Price, s.priceHistory[0].Price
-			for _, p := range s.priceHistory {
-				if p.Price < pmin {
-					pmin = p.Price
-				}
-				if p.Price > pmax {
-					pmax = p.Price
-				}
+			pmin, pmax := history[0].Price, history[0].Price
+			for _, p := range history {
+				if p.Price < pmin { pmin = p.Price }
+				if p.Price > pmax { pmax = p.Price }
 			}
 			rng := pmax - pmin
 			chars := []string{"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
-			for _, p := range s.priceHistory {
-				idx := 0
-				if rng > 0 {
-					idx = int((p.Price-pmin)/rng*7)
-				}
-				sparks += chars[idx]
+			for _, p := range history {
+				idx2 := 0
+				if rng > 0 { idx2 = int((p.Price-pmin)/rng*7) }
+				sparks += chars[idx2]
 			}
 			leftLines = append(leftLines, color(sparks, cyan))
 		}
@@ -988,299 +911,134 @@ func renderFrame(s *State) string {
 		leftLines = append(leftLines, color(fmt.Sprintf("  Fetching %s oracle...", cfg.Name), dim))
 	}
 
-	rightLines := make([]string, 0, 8)
 	if mkt != nil {
 		rightLines = append(rightLines, color("  "+mkt.Slug, bold))
-		rightLines = append(rightLines, color(fmt.Sprintf("  Window  %s → %s",
-			mkt.StartDate.Format("15:04"), mkt.EndDate.Format("15:04 UTC")), dim))
+		rightLines = append(rightLines, color(fmt.Sprintf("  Window  %s → %s", mkt.StartDate.Format("15:04"), mkt.EndDate.Format("15:04 UTC")), dim))
 		remaining := mkt.EndDate.Sub(now)
-		timeColor := green
-		if remaining < 2*time.Minute {
-			timeColor = red
-		} else if remaining < 5*time.Minute {
-			timeColor = yellow
-		}
-		rightLines = append(rightLines, color(fmt.Sprintf("  ⏱  %s remaining", fmtDuration(remaining)), timeColor))
-
+		timeCol := green
+		if remaining < 2*time.Minute { timeCol = red } else if remaining < 5*time.Minute { timeCol = yellow }
+		rightLines = append(rightLines, color(fmt.Sprintf("  ⏱  %s remaining", fmtDuration(remaining)), timeCol))
 		if mkt.OpeningPrice > 0 && cl != nil {
 			delta := cl.Price - mkt.OpeningPrice
 			pct := delta / mkt.OpeningPrice * 100
 			dir, col := "UP ↑", green
-			if delta < 0 {
-				dir, col = "DOWN ↓", red
-			}
+			if delta < 0 { dir, col = "DOWN ↓", red }
 			rightLines = append(rightLines, fmt.Sprintf("  Open %s  Now %s  %s",
-				color(fmtPrice(mkt.OpeningPrice), dim),
-				color(fmtPrice(cl.Price), bold),
+				color(fmtPrice(mkt.OpeningPrice), dim), color(fmtPrice(cl.Price), bold),
 				color(fmt.Sprintf("%+.2f (%+.2f%%) %s", delta, pct, dir), col)))
 		} else {
 			rightLines = append(rightLines, color("  Waiting for opening price...", dim))
 		}
 		rightLines = append(rightLines, "")
-
 		upC, downC := white, white
-		if mkt.UpPrice > mkt.DownPrice {
-			upC = green
-		} else {
-			downC = green
-		}
+		if mkt.UpPrice > mkt.DownPrice { upC = green } else { downC = green }
 		rightLines = append(rightLines, fmt.Sprintf("  Up: %s   Down: %s   Spread: %.3f",
 			color(fmt.Sprintf("%.3f", mkt.UpPrice), upC),
 			color(fmt.Sprintf("%.3f", mkt.DownPrice), downC),
-			mkt.BestAsk-mkt.BestBid,
-		))
+			mkt.BestAsk-mkt.BestBid))
 		rightLines = append(rightLines, color(fmt.Sprintf("  Best Bid: %.2f   Best Ask: %.2f", mkt.BestBid, mkt.BestAsk), dim))
 	} else {
 		rightLines = append(rightLines, color(fmt.Sprintf("  Fetching %s %s market...", cfg.Name, cfg.IntervalLabel), dim))
 	}
 
-	rows := 8
-	for i := 0; i < rows; i++ {
+	for i := 0; i < 8; i++ {
 		l, r := "", ""
-		if i < len(leftLines) {
-			l = leftLines[i]
-		}
-		if i < len(rightLines) {
-			r = rightLines[i]
-		}
-		lv := stripANSI(l)
-		rv := stripANSI(r)
-		lpad := half - 2 - len([]rune(lv))
-		rpad2 := W - half - 2 - len([]rune(rv))
-		if lpad < 0 {
-			lpad = 0
-		}
-		if rpad2 < 0 {
-			rpad2 = 0
-		}
-		write("│" + l + strings.Repeat(" ", lpad) + " │ " + r + strings.Repeat(" ", rpad2) + "│")
+		if i < len(leftLines)  { l = leftLines[i] }
+		if i < len(rightLines) { r = rightLines[i] }
+		lv, rv := stripANSI(l), stripANSI(r)
+		lp := half - 2 - len([]rune(lv))
+		rp := W - half - 2 - len([]rune(rv))
+		if lp < 0 { lp = 0 }
+		if rp < 0 { rp = 0 }
+		write("│" + l + strings.Repeat(" ", lp) + " │ " + r + strings.Repeat(" ", rp) + "│")
 	}
 
 	// ── Order books ──────────────────────────────────────────────────────────
 	write("├" + box(half-1) + "┼" + box(W-half-2) + "┤")
-	upLines := renderOrderHalf(s.bookUp, "UP", half-1)
-	downLines := renderOrderHalf(s.bookDown, "DOWN", W-half-2)
-	maxOB := max(len(upLines), len(downLines))
-	for i := 0; i < maxOB; i++ {
+	upLines   := renderOrderHalf(bookUp,   "UP",   half-1)
+	downLines := renderOrderHalf(bookDown, "DOWN", W-half-2)
+	for i := 0; i < max(len(upLines), len(downLines)); i++ {
 		l, r := "", ""
-		if i < len(upLines) {
-			l = upLines[i]
-		}
-		if i < len(downLines) {
-			r = downLines[i]
-		}
+		if i < len(upLines)   { l = upLines[i] }
+		if i < len(downLines) { r = downLines[i] }
 		lv, rv := stripANSI(l), stripANSI(r)
 		lp := half - 1 - len([]rune(lv))
 		rp := W - half - 2 - len([]rune(rv))
-		if lp < 0 {
-			lp = 0
-		}
-		if rp < 0 {
-			rp = 0
-		}
+		if lp < 0 { lp = 0 }
+		if rp < 0 { rp = 0 }
 		write("│" + l + strings.Repeat(" ", lp) + "│" + r + strings.Repeat(" ", rp) + "│")
 	}
 
 	// ── Signals ──────────────────────────────────────────────────────────────
 	write("├" + box(W-2) + "┤")
-	for _, sigLine := range renderSignals(computeSignals(s.priceHistory, s.market, s.bookUp), W-2) {
+	for _, sigLine := range renderSignals(computeSignals(history, mkt, bookUp), W-2) {
 		vis := stripANSI(sigLine)
 		sp := W - 2 - len([]rune(vis))
-		if sp < 0 {
-			sp = 0
-		}
+		if sp < 0 { sp = 0 }
 		write("│" + sigLine + strings.Repeat(" ", sp) + "│")
 	}
 
 	// ── Price history ────────────────────────────────────────────────────────
 	write("├" + box(W-2) + "┤")
 	histLine := "  "
-	if len(s.priceHistory) > 0 {
-		prev := s.priceHistory[0].Price
-		for i, p := range s.priceHistory {
+	if len(history) > 0 {
+		prev := history[0].Price
+		for i, p := range history {
 			diff := p.Price - prev
-			col := dim
-			arrow := "━"
-			if diff > 0.01 {
-				col, arrow = green, "▲"
-			} else if diff < -0.01 {
-				col, arrow = red, "▼"
-			}
-			if i == 0 {
-				col, arrow = cyan, "●"
-			}
+			col, arrow := dim, "━"
+			if diff > 0.01  { col, arrow = green, "▲" }
+			if diff < -0.01 { col, arrow = red,   "▼" }
+			if i == 0       { col, arrow = cyan,   "●" }
 			histLine += color(fmt.Sprintf("%s%.2f ", arrow, p.Price), col)
 			prev = p.Price
 		}
 	} else {
 		histLine += color("Collecting price history...", dim)
 	}
-	vis := stripANSI(histLine)
-	hp := W - 2 - len([]rune(vis))
-	if hp < 0 {
-		hp = 0
-	}
+	hp := W - 2 - len([]rune(stripANSI(histLine)))
+	if hp < 0 { hp = 0 }
 	write("│" + histLine + strings.Repeat(" ", hp) + "│")
 
 	// ── Status bar ───────────────────────────────────────────────────────────
 	write("├" + box(W-2) + "┤")
 	statusMsg := ""
-	if len(s.errors) > 0 {
-		statusMsg = "  " + color("⚠ "+s.errors[len(s.errors)-1], red)
+	if lastErr != "" {
+		statusMsg = "  " + color("⚠ "+lastErr, red)
 	} else {
-		statusMsg = "  " + color("● Live", green) + color(fmt.Sprintf("  Oracle: Chainlink %s (Polygon)  CLOB: clob.polymarket.com  %s", cfg.Name, now.Format("15:04:05")), dim)
+		statusMsg = "  " + color("● Live", green) +
+			color(fmt.Sprintf("  Oracle: Chainlink %s (Polygon)  CLOB: clob.polymarket.com  %s", cfg.Name, now.Format("15:04:05")), dim)
 	}
-	vis2 := stripANSI(statusMsg)
-	sp2 := W - 2 - len([]rune(vis2))
-	if sp2 < 0 {
-		sp2 = 0
-	}
+	sp2 := W - 2 - len([]rune(stripANSI(statusMsg)))
+	if sp2 < 0 { sp2 = 0 }
 	write("│" + statusMsg + strings.Repeat(" ", sp2) + "│")
 	write("└" + box(W-2) + "┘")
 
 	return b.String()
 }
 
-// ── Goroutines ────────────────────────────────────────────────────────────────
-
-func pollChainlink(state *State, client *http.Client, interval time.Duration) {
-	lastIdx := -1
-	doFetch := func() {
-		state.mu.RLock()
-		idx := state.activeIdx
-		state.mu.RUnlock()
-
-		cfg := allConfigs[idx]
-		p, err := fetchChainlink(client, cfg.OracleAddr)
-		if err != nil {
-			state.addError("oracle: " + err.Error())
-			return
-		}
-		state.mu.Lock()
-		if state.activeIdx != idx {
-			state.mu.Unlock()
-			return
-		}
-		state.chainlink = p
-		state.priceHistory = append(state.priceHistory, *p)
-		if len(state.priceHistory) > priceHistoryLen {
-			state.priceHistory = state.priceHistory[len(state.priceHistory)-priceHistoryLen:]
-		}
-		if state.market != nil && state.market.OpeningPrice == 0 {
-			if time.Now().UTC().After(state.market.StartDate) {
-				state.market.OpeningPrice = p.Price
-			}
-		}
-		lastIdx = idx
-		state.mu.Unlock()
-	}
-
-	doFetch()
-	tick := time.NewTicker(interval)
-	defer tick.Stop()
-	for range tick.C {
-		state.mu.RLock()
-		idx := state.activeIdx
-		state.mu.RUnlock()
-		if idx != lastIdx {
-			// config changed; fetch immediately on next tick (already ticking)
-		}
-		doFetch()
-	}
-}
-
-func pollMarket(state *State, client *http.Client, slugFlag string, interval time.Duration) {
-	doFetch := func() {
-		state.mu.RLock()
-		idx := state.activeIdx
-		state.mu.RUnlock()
-
-		cfg := allConfigs[idx]
-		slug := ""
-		if slugFlag != "" && idx == 0 {
-			slug = slugFlag
-		}
-		m, err := fetchActiveMarket(client, cfg, slug)
-		if err != nil {
-			state.addError("market: " + err.Error())
-			return
-		}
-		state.mu.Lock()
-		if state.activeIdx != idx {
-			state.mu.Unlock()
-			return
-		}
-		prevSlug := ""
-		if state.market != nil {
-			prevSlug = state.market.Slug
-			m.OpeningPrice = state.market.OpeningPrice
-		}
-		if prevSlug != m.Slug {
-			m.OpeningPrice = 0
-		}
-		state.market = m
-		state.mu.Unlock()
-	}
-
-	doFetch()
-	tick := time.NewTicker(interval)
-	defer tick.Stop()
-	for range tick.C {
-		doFetch()
-	}
-}
-
-func pollBooks(state *State, client *http.Client, interval time.Duration) {
-	tick := time.NewTicker(interval)
-	defer tick.Stop()
-	for range tick.C {
-		state.mu.RLock()
-		mkt := state.market
-		idx := state.activeIdx
-		state.mu.RUnlock()
-
-		if mkt == nil || mkt.TokenIDUp == "" {
-			continue
-		}
-
-		upBook, err := fetchBook(client, mkt.TokenIDUp)
-		if err != nil {
-			state.addError("book(up): " + err.Error())
-		}
-		downBook, err2 := fetchBook(client, mkt.TokenIDDown)
-		if err2 != nil {
-			state.addError("book(down): " + err2.Error())
-		}
-
-		state.mu.Lock()
-		if state.activeIdx == idx {
-			if upBook != nil {
-				state.bookUp = upBook
-			}
-			if downBook != nil {
-				state.bookDown = downBook
-			}
-		}
-		state.mu.Unlock()
-	}
-}
-
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	slugFlag := flag.String("slug", "", "Pin a specific market slug (default: auto-detect; only applies to ETH/USD 15m)")
-	flag.Parse()
-
+	state  := newState()
 	client := &http.Client{Timeout: 10 * time.Second}
-	state := &State{}
 
-	fmt.Print(hideCursor)
-	fmt.Print(clearScr)
-	fmt.Println(color("  Initializing...", dim))
+	// Enter alternate screen — keeps frame fixed, no scrolling
+	fmt.Print(hideCursor + altScreenOn)
 
-	go pollChainlink(state, client, 5*time.Second)
-	go pollMarket(state, client, *slugFlag, 10*time.Second)
-	go pollBooks(state, client, 5*time.Second)
+	cleanup := func() {
+		fmt.Print(showCursor + altScreenOff)
+	}
+
+	// Launch a background poller for every config
+	// Active config is re-polled every 5s; others every 60s
+	activeTick := time.NewTicker(5 * time.Second)
+	bgTick     := time.NewTicker(60 * time.Second)
+
+	for i := range allConfigs {
+		i := i
+		go pollConfig(state, client, i, activeTick.C, bgTick.C)
+		time.Sleep(200 * time.Millisecond) // stagger startup to avoid thundering herd
+	}
 
 	renderTick := time.NewTicker(500 * time.Millisecond)
 	defer renderTick.Stop()
@@ -1288,16 +1046,15 @@ func main() {
 	osig := make(chan os.Signal, 1)
 	signal.Notify(osig, syscall.SIGINT, syscall.SIGTERM)
 
-	quit := make(chan struct{})
-	switchCh := make(chan int, 4)
+	quit     := make(chan struct{})
+	switchCh := make(chan int, 8)
 
+	// Key reader
 	go func() {
 		buf := make([]byte, 1)
 		for {
 			n, _ := os.Stdin.Read(buf)
-			if n == 0 {
-				continue
-			}
+			if n == 0 { continue }
 			ch := buf[0]
 			switch {
 			case ch == 'q' || ch == 'Q' || ch == 3:
@@ -1308,20 +1065,20 @@ func main() {
 			case ch == 'p' || ch == 'P':
 				switchCh <- -1
 			case ch >= '1' && ch <= '9':
-				idx := int(ch - '1')
-				if idx < len(allConfigs) {
+				if idx := int(ch - '1'); idx < len(allConfigs) {
 					switchCh <- 100 + idx
 				}
 			}
 		}
 	}()
 
+	// Switch handler
 	go func() {
 		for v := range switchCh {
-			state.mu.RLock()
-			cur := state.activeIdx
-			state.mu.RUnlock()
-
+			s := state
+			s.mu.RLock()
+			cur := s.activeIdx
+			s.mu.RUnlock()
 			var next int
 			if v >= 100 {
 				next = v - 100
@@ -1329,28 +1086,24 @@ func main() {
 				next = (cur + 1) % len(allConfigs)
 			} else {
 				next = cur - 1
-				if next < 0 {
-					next = len(allConfigs) - 1
-				}
+				if next < 0 { next = len(allConfigs) - 1 }
 			}
-			state.switchMarket(next)
+			state.switchTo(next)
 		}
 	}()
 
 	for {
 		select {
 		case <-osig:
-			fmt.Print(showCursor)
-			fmt.Print("\033[2J\033[H")
+			cleanup()
 			fmt.Println("Exiting.")
 			os.Exit(0)
 		case <-quit:
-			fmt.Print(showCursor)
-			fmt.Print("\033[2J\033[H")
+			cleanup()
 			os.Exit(0)
 		case <-renderTick.C:
 			frame := renderFrame(state)
-			fmt.Print("\033[H")
+			fmt.Print("\033[H\033[2J\033[H") // home + clear + home prevents scroll artifacts
 			fmt.Print(frame)
 		}
 	}
