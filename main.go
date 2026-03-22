@@ -445,80 +445,102 @@ func fetchBook(client *http.Client, tokenID string) (*OrderBook, error) {
 
 // ── Polling goroutines ────────────────────────────────────────────────────────
 
-// pollConfig polls oracle, market, and books for a single config index.
-// Active config is polled every tick; background configs every bgInterval ticks.
-func pollConfig(state *State, client *http.Client, cfgIdx int, activeTick, bgTick <-chan time.Time) {
-	cfg := allConfigs[cfgIdx]
+// pollConfig polls oracle, market, and books for one config index.
+// refreshCh: receives a signal to fetch immediately (e.g. on tab switch).
+// activeTick: frequent tick used when this config is active.
+// bgTick: slower tick used when this config is in the background.
+func pollConfig(state *State, client *http.Client, cfgIdx int,
+	refreshCh <-chan struct{}, activeTick, bgTick <-chan time.Time) {
+
+	cfg   := allConfigs[cfgIdx]
 	cache := state.caches[cfgIdx]
 
-	doAll := func() {
-		// Oracle
+	doOracle := func() {
 		p, err := fetchChainlink(client, cfg.OracleAddr)
 		if err != nil {
 			cache.setError("oracle: " + err.Error())
-		} else {
-			cache.mu.Lock()
-			cache.chainlink = p
-			cache.priceHistory = append(cache.priceHistory, *p)
-			if len(cache.priceHistory) > priceHistoryLen {
-				cache.priceHistory = cache.priceHistory[len(cache.priceHistory)-priceHistoryLen:]
-			}
-			if cache.market != nil && cache.market.OpeningPrice == 0 {
-				if time.Now().UTC().After(cache.market.StartDate) {
-					cache.market.OpeningPrice = p.Price
-				}
-			}
-			cache.lastError = ""
-			cache.mu.Unlock()
+			return
 		}
+		cache.mu.Lock()
+		cache.chainlink = p
+		cache.priceHistory = append(cache.priceHistory, *p)
+		if len(cache.priceHistory) > priceHistoryLen {
+			cache.priceHistory = cache.priceHistory[len(cache.priceHistory)-priceHistoryLen:]
+		}
+		if cache.market != nil && cache.market.OpeningPrice == 0 {
+			if time.Now().UTC().After(cache.market.StartDate) {
+				cache.market.OpeningPrice = p.Price
+			}
+		}
+		cache.lastError = ""
+		cache.mu.Unlock()
+	}
 
-		// Market
+	doMarket := func() {
 		m, err := fetchMarket(client, cfg)
 		if err != nil {
 			cache.setError("market: " + err.Error())
-		} else {
-			cache.mu.Lock()
-			if cache.market != nil && cache.market.Slug == m.Slug {
-				m.OpeningPrice = cache.market.OpeningPrice
-			}
-			cache.market = m
-			cache.mu.Unlock()
+			return
 		}
+		cache.mu.Lock()
+		if cache.market != nil && cache.market.Slug == m.Slug {
+			m.OpeningPrice = cache.market.OpeningPrice
+		}
+		cache.market = m
+		cache.mu.Unlock()
+	}
 
-		// Books
+	doBooks := func() {
 		cache.mu.RLock()
 		mkt := cache.market
 		cache.mu.RUnlock()
-		if mkt != nil && mkt.TokenIDUp != "" {
-			if up, err := fetchBook(client, mkt.TokenIDUp); err == nil {
+		if mkt == nil || mkt.TokenIDUp == "" {
+			return
+		}
+		if up, err := fetchBook(client, mkt.TokenIDUp); err == nil {
+			cache.mu.Lock()
+			cache.bookUp = up
+			cache.mu.Unlock()
+		}
+		if mkt.TokenIDDown != "" {
+			if down, err := fetchBook(client, mkt.TokenIDDown); err == nil {
 				cache.mu.Lock()
-				cache.bookUp = up
+				cache.bookDown = down
 				cache.mu.Unlock()
-			}
-			if mkt.TokenIDDown != "" {
-				if down, err := fetchBook(client, mkt.TokenIDDown); err == nil {
-					cache.mu.Lock()
-					cache.bookDown = down
-					cache.mu.Unlock()
-				}
 			}
 		}
 	}
 
-	// initial fetch
+	doAll := func() {
+		doOracle()
+		doMarket()
+		doBooks()
+	}
+
+	// Pre-fetch immediately at startup (all configs, not just active)
 	go doAll()
 
 	for {
 		select {
+		case <-refreshCh:
+			// Tab was switched to this config — fetch everything immediately
+			go doAll()
+
 		case <-activeTick:
-			_, activeIdx := state.active()
-			if activeIdx == cache {
-				doAll()
+			activeIdx, _ := state.active()
+			if activeIdx == cfgIdx {
+				go doOracle()
+				go doBooks()
 			}
+
 		case <-bgTick:
-			_, activeIdx := state.active()
-			if activeIdx != cache {
-				doAll()
+			activeIdx, _ := state.active()
+			if activeIdx != cfgIdx {
+				// Background refresh: keep data warm for instant switching
+				go doAll()
+			} else {
+				// Active config: also refresh market on bg tick
+				go doMarket()
 			}
 		}
 	}
