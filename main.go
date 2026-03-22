@@ -1051,15 +1051,21 @@ func main() {
 		fmt.Print(showCursor + altScreenOff)
 	}
 
-	// Launch a background poller for every config
-	// Active config is re-polled every 5s; others every 60s
+	// Per-config refresh channels — buffered so sends never block
+	refreshChs := make([]chan struct{}, len(allConfigs))
+	for i := range refreshChs {
+		refreshChs[i] = make(chan struct{}, 1)
+	}
+
+	// Active config: oracle+books every 5s, market every 30s
+	// Background configs: full refresh every 30s (keeps all data warm)
 	activeTick := time.NewTicker(5 * time.Second)
-	bgTick     := time.NewTicker(60 * time.Second)
+	bgTick     := time.NewTicker(30 * time.Second)
 
 	for i := range allConfigs {
 		i := i
-		go pollConfig(state, client, i, activeTick.C, bgTick.C)
-		time.Sleep(200 * time.Millisecond) // stagger startup to avoid thundering herd
+		go pollConfig(state, client, i, refreshChs[i], activeTick.C, bgTick.C)
+		time.Sleep(100 * time.Millisecond) // light stagger to spread initial API calls
 	}
 
 	renderTick := time.NewTicker(500 * time.Millisecond)
@@ -1094,13 +1100,12 @@ func main() {
 		}
 	}()
 
-	// Switch handler
+	// Switch handler — also signals an immediate refresh on the new tab
 	go func() {
 		for v := range switchCh {
-			s := state
-			s.mu.RLock()
-			cur := s.activeIdx
-			s.mu.RUnlock()
+			state.mu.RLock()
+			cur := state.activeIdx
+			state.mu.RUnlock()
 			var next int
 			if v >= 100 {
 				next = v - 100
@@ -1111,6 +1116,11 @@ func main() {
 				if next < 0 { next = len(allConfigs) - 1 }
 			}
 			state.switchTo(next)
+			// Non-blocking signal to refresh the new tab immediately
+			select {
+			case refreshChs[next] <- struct{}{}:
+			default:
+			}
 		}
 	}()
 
